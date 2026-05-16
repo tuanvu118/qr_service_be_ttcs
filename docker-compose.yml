@@ -21,6 +21,21 @@ services:
     networks:
       - default
 
+  qr_redis:
+    image: redis:7-alpine
+    container_name: qr_redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_HOST_PORT:-6380}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - default
+
   qr_service:
     build:
       context: .
@@ -29,6 +44,8 @@ services:
     restart: unless-stopped
     depends_on:
       qr_mongodb:
+        condition: service_healthy
+      qr_redis:
         condition: service_healthy
     ports:
       - "${BACKEND_HOST_PORT:-8001}:8000"
@@ -44,6 +61,10 @@ services:
       RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-guest}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
       RABBITMQ_VHOST: ${RABBITMQ_VHOST:-/}
+      REDIS_HOST: qr_redis
+      REDIS_PORT: 6379
+      REDIS_DB: ${REDIS_DB:-0}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
     networks:
       - default
       - ttcs_shared

@@ -24,6 +24,7 @@ class TokenData(BaseModel):
     email: Optional[str] = None
     is_active: bool = True
     roles: List[UnitRole]
+    unit_id: Optional[str] = None
 
 
 class RefreshTokenRequest(BaseModel):

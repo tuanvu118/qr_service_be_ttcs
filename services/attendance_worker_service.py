@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timezone
 
 from beanie import PydanticObjectId
@@ -11,13 +12,10 @@ from models.attendance import Attendance
 from models.audit_log import AuditLog
 from repositories.attendance_repo import AttendanceRepository
 from repositories.audit_log_repo import AuditLogRepository
-from repositories.event_registration_repo import EventRegistrationRepository
-from repositories.public_event_repo import PublicEventRepository
-from repositories.unit_event_repo import UnitEventRepo
-from repositories.unit_event_submission_members_repo import UnitEventSubmissionMembersRepo
-from repositories.unit_event_submissions_repo import UnitEventSubmissionsRepo
-from repositories.user_repo import UserRepo
+from repositories.participant_repo import ParticipantRepository
 from schemas.attendance import CheckInMessage
+
+logger = logging.getLogger("qr_service.attendance_worker")
 
 
 class AttendanceWorkerService:
@@ -92,36 +90,31 @@ class AttendanceWorkerService:
                 user_id,
                 event_type=event_type,
             ):
-                event_end = await AttendanceWorkerService._resolve_event_end(
-                    event_id,
-                    event_type,
-                )
                 await AttendanceWorkerService._set_completed_duplicate_marker(
                     duplicate_key=duplicate_key,
-                    event_end=event_end,
+                    event_end=None,
                     request_id=message.request_id,
                 )
                 return
 
-            event_end = await AttendanceWorkerService._resolve_event_end(event_id, event_type)
-            if event_type == "public":
-                registration = await EventRegistrationRepository.get_by_event_and_user(
-                    event_id,
-                    user_id,
-                )
-                if not registration:
-                    await redis.delete(duplicate_key)
-                    return
-            elif event_type == "unit":
-                matched_submission_ids = await AttendanceWorkerService._get_unit_submission_ids_for_user(
-                    event_id,
-                    user_id,
-                )
-                if not matched_submission_ids:
-                    await redis.delete(duplicate_key)
-                    return
-            else:
+            if event_type not in {"public", "unit"}:
                 await redis.delete(duplicate_key)
+                return
+
+            participant_exists = await ParticipantRepository.exists_by_event_and_user(
+                str(event_id),
+                str(user_id),
+                event_type=event_type,
+            )
+            if not participant_exists:
+                await redis.delete(duplicate_key)
+                logger.warning(
+                    "[QR-WORKER] Participant missing | event_type=%s | event=%s | user=%s | request_id=%s",
+                    event_type,
+                    event_id,
+                    user_id,
+                    message.request_id,
+                )
                 return
 
             attendance = Attendance(
@@ -141,16 +134,6 @@ class AttendanceWorkerService:
                 source=message.source,
             )
             await AttendanceRepository.create(attendance)
-            if event_type == "public":
-                await EventRegistrationRepository.mark_checked_in(event_id, user_id)
-            elif event_type == "unit":
-                user = await UserRepo().get_by_id(user_id)
-                student_id = user.student_id if user else None
-                await UnitEventSubmissionMembersRepo().mark_checked_in_by_submission_ids_and_user(
-                    matched_submission_ids,
-                    user_id,
-                    student_id=student_id,
-                )
             await AuditLogRepository.create(
                 AuditLog(
                     action="attendance.checkin.completed",
@@ -171,55 +154,18 @@ class AttendanceWorkerService:
             )
             await AttendanceWorkerService._set_completed_duplicate_marker(
                 duplicate_key=duplicate_key,
-                event_end=event_end,
+                event_end=None,
                 request_id=message.request_id,
+            )
+            logger.info(
+                "[QR-WORKER] Check-in completed | request_id=%s | event_type=%s | event=%s | user=%s",
+                message.request_id,
+                event_type,
+                event_id,
+                user_id,
             )
         except Exception:
             await redis.delete(duplicate_key)
             raise
         finally:
             await AttendanceWorkerService._release_lock(lock_key, lock_token)
-
-    @staticmethod
-    async def _resolve_event_end(
-        event_id: PydanticObjectId,
-        event_type: str,
-    ) -> datetime | None:
-        if event_type == "public":
-            event = await PublicEventRepository.get_by_id(event_id)
-            return event.event_end if event else None
-        if event_type == "unit":
-            event = await UnitEventRepo().get_by_id(event_id)
-            return event.event_end if event else None
-        return None
-
-    @staticmethod
-    async def _get_unit_submission_ids_for_user(
-        event_id: PydanticObjectId,
-        user_id: PydanticObjectId,
-    ) -> list[PydanticObjectId]:
-        approved_submissions = await UnitEventSubmissionsRepo().get_all_approved_by_unit_event_id(
-            event_id
-        )
-        submission_ids = [submission.id for submission in approved_submissions]
-        if not submission_ids:
-            return []
-
-        members = await UnitEventSubmissionMembersRepo().get_all_by_unit_event_submission_ids(
-            submission_ids
-        )
-        user = await UserRepo().get_by_id(user_id)
-        student_id = str(user.student_id).strip() if user and user.student_id else None
-
-        matched_submission_ids: set[PydanticObjectId] = set()
-        for member in members:
-            matched_user = member.userId == user_id
-            matched_student = (
-                student_id is not None
-                and member.studentId is not None
-                and str(member.studentId).strip() == student_id
-            )
-            if matched_user or matched_student:
-                matched_submission_ids.add(member.unitEventSubmissionId)
-
-        return list(matched_submission_ids)

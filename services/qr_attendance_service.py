@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 import math
 import secrets
 import uuid
@@ -20,27 +21,20 @@ from configs.settings import (
 )
 from exceptions import ErrorCode, app_exception
 from models.audit_log import AuditLog
-from repositories.attendance_repo import AttendanceRepository
 from repositories.audit_log_repo import AuditLogRepository
-from repositories.event_registration_repo import EventRegistrationRepository
-from repositories.public_event_repo import PublicEventRepository
-from repositories.unit_event_repo import UnitEventRepo
-from repositories.unit_event_submission_members_repo import UnitEventSubmissionMembersRepo
-from repositories.unit_event_submissions_repo import UnitEventSubmissionsRepo
-from repositories.user_repo import UserRepo
-from models.unit_event import UnitEventEnum
+from repositories.participant_repo import ParticipantRepository
 from schemas.attendance import (
     AttendanceCodeRequest,
-    AttendanceRead,
     CheckInMessage,
     QRPayloadData,
     QRScanQueuedResponse,
     QRScanRequest,
     QRSessionOpenRequest,
     QRSessionOpenResponse,
-    QRSessionRead,
     QRWindowResponse,
 )
+
+logger = logging.getLogger("qr_service.attendance")
 
 
 class QRAttendanceService:
@@ -321,106 +315,19 @@ class QRAttendanceService:
             await redis.delete(duplicate_key)
             app_exception(ErrorCode.CHECKIN_QUEUE_UNAVAILABLE)
 
+        logger.info(
+            "[QR-API] Pushed to RabbitMQ | request_id=%s | user=%s | event=%s",
+            request_id,
+            current_user_id,
+            event_id,
+        )
+
         return QRScanQueuedResponse(
             request_id=request_id,
             session_id=payload.sessionId,
             event_id=event_id,
             queued_at=queued_at,
         )
-
-    @staticmethod
-    async def _get_public_event_or_raise(event_id: PydanticObjectId):
-        event = await PublicEventRepository.get_by_id(event_id)
-        if not event:
-            app_exception(ErrorCode.EVENT_NOT_FOUND)
-        return event
-
-    @staticmethod
-    async def _get_unit_event_or_raise(event_id: PydanticObjectId):
-        event = await UnitEventRepo().get_by_id(event_id)
-        if not event:
-            app_exception(ErrorCode.UNIT_EVENT_NOT_FOUND)
-        if event.type != UnitEventEnum.HTSK:
-            app_exception(ErrorCode.INVALID_UNIT_EVENT_TYPE_VALUE)
-        return event
-
-    @staticmethod
-    def _validate_public_session_time_range(
-        event,
-        session_start: datetime,
-        session_end: datetime,
-    ) -> None:
-        event_start = QRAttendanceService._ensure_utc(event.event_start)
-        event_end = QRAttendanceService._ensure_utc(event.event_end)
-
-        if session_start >= session_end:
-            app_exception(ErrorCode.INVALID_QR_SESSION_TIME)
-        if session_start < event_start:
-            app_exception(
-                ErrorCode.INVALID_QR_SESSION_TIME,
-                extra_detail="session_start phai nam trong khoang thoi gian event",
-            )
-        if session_end > event_end:
-            app_exception(
-                ErrorCode.INVALID_QR_SESSION_TIME,
-                extra_detail="session_end khong duoc vuot qua event_end",
-            )
-
-    @staticmethod
-    def _validate_unit_session_time_range(
-        event,
-        session_start: datetime,
-        session_end: datetime,
-    ) -> None:
-        if session_start >= session_end:
-            app_exception(ErrorCode.INVALID_QR_SESSION_TIME)
-        event_start = event.event_start
-        event_end = event.event_end
-        if event_start is None or event_end is None:
-            app_exception(
-                ErrorCode.INVALID_QR_SESSION_TIME,
-                extra_detail="unit_event phai co event_start va event_end",
-            )
-        normalized_event_start = QRAttendanceService._ensure_utc(event_start)
-        normalized_event_end = QRAttendanceService._ensure_utc(event_end)
-        if session_start < normalized_event_start:
-            app_exception(
-                ErrorCode.INVALID_QR_SESSION_TIME,
-                extra_detail="session_start phai nam trong khoang thoi gian unit_event",
-            )
-        if session_end > normalized_event_end:
-            app_exception(
-                ErrorCode.INVALID_QR_SESSION_TIME,
-                extra_detail="session_end khong duoc vuot qua event_end cua unit_event",
-            )
-
-    @staticmethod
-    async def _get_unit_event_participant_ids(
-        event_id: PydanticObjectId,
-    ) -> list[PydanticObjectId]:
-        approved_submissions = await UnitEventSubmissionsRepo().get_all_approved_by_unit_event_id(
-            event_id
-        )
-        submission_ids = [submission.id for submission in approved_submissions]
-        members = await UnitEventSubmissionMembersRepo().get_all_by_unit_event_submission_ids(
-            submission_ids
-        )
-        participant_ids: set[PydanticObjectId] = {
-            member.userId
-            for member in members
-            if member.userId is not None
-        }
-
-        unresolved_student_ids = [
-            str(member.studentId).strip()
-            for member in members
-            if member.userId is None and member.studentId is not None and str(member.studentId).strip()
-        ]
-        if unresolved_student_ids:
-            users = await UserRepo().get_by_student_ids(unresolved_student_ids)
-            participant_ids.update(user.id for user in users)
-
-        return list(participant_ids)
 
     @staticmethod
     async def _create_session(
@@ -516,6 +423,14 @@ class QRAttendanceService:
             )
         )
 
+        logger.info(
+            "[QR-API] Session created | session_id=%s | event=%s | windows=%s | participants=%s",
+            session_id,
+            event_id,
+            len(windows),
+            len(participant_ids),
+        )
+
         return QRSessionOpenResponse(
             session_id=session_id,
             event_id=event_id,
@@ -534,18 +449,33 @@ class QRAttendanceService:
         actor_id: PydanticObjectId,
         request: QRSessionOpenRequest,
     ) -> QRSessionOpenResponse:
-        event = await QRAttendanceService._get_public_event_or_raise(event_id)
         QRAttendanceService._validate_location_configuration(request)
 
         now = QRAttendanceService._utc_now()
         session_start = QRAttendanceService._ensure_utc(request.session_start or now)
-        session_end = QRAttendanceService._ensure_utc(request.session_end or event.event_end)
-        QRAttendanceService._validate_public_session_time_range(
-            event,
-            session_start,
-            session_end,
+        session_end = request.session_end
+        if session_end is None:
+            app_exception(
+                ErrorCode.INVALID_QR_SESSION_TIME,
+                extra_detail="session_end la bat buoc",
+            )
+        session_end = QRAttendanceService._ensure_utc(session_end)
+        if session_start >= session_end:
+            app_exception(ErrorCode.INVALID_QR_SESSION_TIME)
+
+        participant_id_strs = await ParticipantRepository.list_user_ids_by_event(
+            str(event_id),
+            "public",
         )
-        participant_ids = await EventRegistrationRepository.list_user_ids_by_event(event_id)
+        participant_ids = [PydanticObjectId(participant_id) for participant_id in participant_id_strs]
+
+        logger.info(
+            "[QR-API] open_public_session | event_id=%s | actor=%s | participants=%s",
+            event_id,
+            actor_id,
+            len(participant_ids),
+        )
+
         return await QRAttendanceService._create_session(
             event_id=event_id,
             event_type="public",
@@ -562,24 +492,33 @@ class QRAttendanceService:
         actor_id: PydanticObjectId,
         request: QRSessionOpenRequest,
     ) -> QRSessionOpenResponse:
-        event = await QRAttendanceService._get_unit_event_or_raise(event_id)
         QRAttendanceService._validate_location_configuration(request)
 
         now = QRAttendanceService._utc_now()
         session_start = QRAttendanceService._ensure_utc(request.session_start or now)
-        event_end = event.event_end
-        if event_end is None:
+        session_end = request.session_end
+        if session_end is None:
             app_exception(
                 ErrorCode.INVALID_QR_SESSION_TIME,
-                extra_detail="unit_event phai co event_end de mo QR session",
+                extra_detail="session_end la bat buoc",
             )
-        session_end = QRAttendanceService._ensure_utc(request.session_end or event_end)
-        QRAttendanceService._validate_unit_session_time_range(
-            event,
-            session_start,
-            session_end,
+        session_end = QRAttendanceService._ensure_utc(session_end)
+        if session_start >= session_end:
+            app_exception(ErrorCode.INVALID_QR_SESSION_TIME)
+
+        participant_id_strs = await ParticipantRepository.list_user_ids_by_event(
+            str(event_id),
+            "unit",
         )
-        participant_ids = await QRAttendanceService._get_unit_event_participant_ids(event_id)
+        participant_ids = [PydanticObjectId(participant_id) for participant_id in participant_id_strs]
+
+        logger.info(
+            "[QR-API] open_unit_event_session | event_id=%s | actor=%s | participants=%s",
+            event_id,
+            actor_id,
+            len(participant_ids),
+        )
+
         return await QRAttendanceService._create_session(
             event_id=event_id,
             event_type="unit",
@@ -588,29 +527,6 @@ class QRAttendanceService:
             session_start=session_start,
             session_end=session_end,
             participant_ids=participant_ids,
-        )
-
-    @staticmethod
-    async def get_session(session_id: str) -> QRSessionRead:
-        redis = get_redis()
-        payload = await redis.get(QRAttendanceService._session_key(session_id))
-        if not payload:
-            app_exception(ErrorCode.QR_SESSION_NOT_FOUND)
-
-        session_meta = json.loads(payload)
-        return QRSessionRead(
-            session_id=session_meta["session_id"],
-            event_id=PydanticObjectId(session_meta["event_id"]),
-            event_type=session_meta["event_type"],
-            session_start=QRAttendanceService._parse_datetime(session_meta["session_start"]),
-            session_end=QRAttendanceService._parse_datetime(session_meta["session_end"]),
-            window_seconds=int(session_meta["window_seconds"]),
-            participant_count=int(session_meta["participant_count"]),
-            location_required=bool(session_meta["location_required"]),
-            latitude=session_meta.get("latitude"),
-            longitude=session_meta.get("longitude"),
-            radius_meters=session_meta.get("radius_meters"),
-            status=session_meta["status"],
         )
 
     @staticmethod
@@ -705,15 +621,3 @@ class QRAttendanceService:
             source_ip=source_ip,
             invalid_error=ErrorCode.ATTENDANCE_CODE_INVALID,
         )
-
-    @staticmethod
-    async def list_public_attendances(event_id: PydanticObjectId) -> list[AttendanceRead]:
-        await QRAttendanceService._get_public_event_or_raise(event_id)
-        attendances = await AttendanceRepository.list_by_event(event_id, event_type="public")
-        return [AttendanceRead.model_validate(attendance) for attendance in attendances]
-
-    @staticmethod
-    async def list_unit_event_attendances(event_id: PydanticObjectId) -> list[AttendanceRead]:
-        await QRAttendanceService._get_unit_event_or_raise(event_id)
-        attendances = await AttendanceRepository.list_by_event(event_id, event_type="unit")
-        return [AttendanceRead.model_validate(attendance) for attendance in attendances]
