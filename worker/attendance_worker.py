@@ -18,6 +18,7 @@ from configs.settings import RABBITMQ_CHECKIN_MAX_RETRIES
 from schemas.attendance import CheckInMessage
 from services.attendance_worker_service import AttendanceWorkerService
 
+# Các key header dùng để theo dõi quá trình retry tin nhắn
 RETRY_COUNT_HEADER = "x-checkin-retry-count"
 FAILED_AT_HEADER = "x-checkin-last-failed-at"
 ERROR_TYPE_HEADER = "x-checkin-error-type"
@@ -25,10 +26,12 @@ ERROR_MESSAGE_HEADER = "x-checkin-error-message"
 
 
 def _utc_now_iso() -> str:
+    """Lấy thời gian UTC hiện tại dưới dạng chuỗi ISO."""
     return datetime.now(timezone.utc).isoformat()
 
 
 def _message_id(message, payload: dict[str, Any] | None = None) -> str:
+    """Lấy message_id từ tin nhắn RabbitMQ hoặc từ payload (request_id)."""
     if message.message_id:
         return message.message_id
     if payload and payload.get("request_id"):
@@ -37,6 +40,7 @@ def _message_id(message, payload: dict[str, Any] | None = None) -> str:
 
 
 def _retry_count(message) -> int:
+    """Đọc số lần đã retry từ headers của tin nhắn."""
     headers = message.headers or {}
     raw_value = headers.get(RETRY_COUNT_HEADER, 0)
     try:
@@ -46,6 +50,7 @@ def _retry_count(message) -> int:
 
 
 def _failure_headers(message, exc: Exception, retry_count: int) -> dict[str, Any]:
+    """Tạo các headers bổ sung khi xử lý tin nhắn thất bại (số lần retry, thời điểm lỗi, loại lỗi)."""
     return {
         RETRY_COUNT_HEADER: retry_count,
         FAILED_AT_HEADER: _utc_now_iso(),
@@ -55,6 +60,7 @@ def _failure_headers(message, exc: Exception, retry_count: int) -> dict[str, Any
 
 
 async def _send_invalid_message_to_dlq(message, exc: Exception) -> None:
+    """Gửi tin nhắn không đúng định dạng vào hàng đợi Dead Letter (DLQ) để kiểm tra sau."""
     raw_body = message.body.decode("utf-8", errors="replace")
     headers = _failure_headers(message, exc, _retry_count(message))
     headers["x-checkin-failure-kind"] = "invalid-message"
@@ -76,6 +82,11 @@ async def _handle_processing_failure(
     payload: dict[str, Any],
     exc: Exception,
 ) -> None:
+    """
+    Xử lý khi worker gặp lỗi logic (DB sập, v.v.): 
+    - Đẩy vào hàng đợi Retry nếu chưa quá giới hạn.
+    - Hoặc đẩy vào DLQ nếu đã hết lượt retry.
+    """
     current_retry_count = _retry_count(message)
     next_retry_count = current_retry_count + 1
     message_id = _message_id(message, payload)
@@ -114,6 +125,7 @@ async def _handle_processing_failure(
 
 
 async def run_worker() -> None:
+    """Tiến trình chính của worker: khởi tạo DB, kết nối hàng đợi và lặp để xử lý từng tin nhắn check-in."""
     await init_db()
     queue = await get_checkin_queue()
 
@@ -140,12 +152,14 @@ async def run_worker() -> None:
                     continue
 
                 try:
+                    # Gọi service để xử lý logic check-in và lưu DB
                     await AttendanceWorkerService.process_checkin(checkin_message)
                 except Exception as exc:
                     await _handle_processing_failure(message, payload, exc)
 
 
 async def _main() -> None:
+    """Điểm khởi đầu của script, đảm bảo đóng kết nối an toàn khi worker dừng."""
     try:
         await run_worker()
     finally:

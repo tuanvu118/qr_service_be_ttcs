@@ -14,7 +14,8 @@ from schemas.attendance import (
 )
 from schemas.auth import TokenData
 from security import require_admin_or_manager_global, require_user
-from services.qr_attendance_service import QRAttendanceService
+from services.qr.qr_session_service import QRSessionService
+from services.qr.qr_checkin_service import QRCheckinService
 from utils.rate_limiter import limiter
 
 logger = logging.getLogger("qr_service.router")
@@ -44,7 +45,7 @@ async def open_public_session(
         current_user.sub,
         event_id,
     )
-    return await QRAttendanceService.open_public_session(
+    return await QRSessionService.open_public_session(
         event_id=event_id,
         actor_id=_to_object_id(current_user.sub),
         request=request_body,
@@ -66,7 +67,7 @@ async def open_unit_event_session(
         current_user.sub,
         event_id,
     )
-    return await QRAttendanceService.open_unit_event_session(
+    return await QRSessionService.open_unit_event_session(
         event_id=event_id,
         actor_id=_to_object_id(current_user.sub),
         request=request_body,
@@ -85,7 +86,7 @@ async def scan_qr_code(
 ) -> QRScanQueuedResponse:
     source_ip = request.client.host if request.client else None
     logger.info("[QR-API] scan_qr_code | user_id=%s", current_user.sub)
-    return await QRAttendanceService.submit_scan(
+    return await QRCheckinService.submit_scan(
         current_user_id=_to_object_id(current_user.sub),
         request=request_body,
         source_ip=source_ip,
@@ -105,7 +106,7 @@ async def submit_attendance_code(
 ) -> QRScanQueuedResponse:
     source_ip = request.client.host if request.client else None
     logger.info("[QR-API] submit_attendance_code | user_id=%s", current_user.sub)
-    return await QRAttendanceService.submit_manual_code(
+    return await QRCheckinService.submit_manual_code(
         current_user_id=_to_object_id(current_user.sub),
         request=request_body,
         source_ip=source_ip,
