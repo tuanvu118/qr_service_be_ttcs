@@ -22,7 +22,7 @@ if not any(
 ):
     load_dotenv(APP_DIR / ".env")
 
-API_PREFIX = "/api"
+API_PREFIX = "/qr"
 BACKEND_CONTAINER_PORT = int(os.getenv("BACKEND_CONTAINER_PORT", "8000"))
 DB_NAME = os.getenv("MONGO_DATABASE") or os.getenv("DB_NAME", "qr_attendance_db")
 
