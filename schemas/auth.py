@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 
 from pydantic import BaseModel
 
@@ -21,8 +21,8 @@ class UnitRole(BaseModel):
 
 class TokenData(BaseModel):
     sub: str
-    email: str
-    is_active: bool
+    email: Optional[str] = None
+    is_active: bool = True
     roles: List[UnitRole]
 
 
