@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 from beanie import PydanticObjectId
 
+from configs.rabbitmq import publish_checkin_sync_message
 from configs.redis_config import get_redis
 from configs.settings import (
     QR_CHECKIN_LOCK_TTL_SECONDS,
@@ -72,6 +73,34 @@ class AttendanceWorkerService:
         )
 
     @staticmethod
+    async def _publish_checkin_sync(
+        *,
+        attendance: Attendance,
+        event_type: str,
+        event_id: PydanticObjectId,
+        user_id: PydanticObjectId,
+        request_id: str,
+    ) -> None:
+        sync_payload = {
+            "user_id": str(user_id),
+            "event_id": str(event_id),
+            "event_type": event_type,
+            "request_id": request_id,
+            "checked_in_at": attendance.scanned_at.isoformat(),
+        }
+        await publish_checkin_sync_message(
+            payload=sync_payload,
+            message_id=request_id,
+        )
+        logger.info(
+            "[qr: Thành công] Đã publish message đồng bộ check-in sang BE | request_id=%s | event_type=%s | event=%s | user=%s",
+            request_id,
+            event_type,
+            event_id,
+            user_id,
+        )
+
+    @staticmethod
     async def process_checkin(message: CheckInMessage) -> None:
         event_id = PydanticObjectId(message.event_id)
         user_id = PydanticObjectId(message.user_id)
@@ -85,11 +114,21 @@ class AttendanceWorkerService:
 
         redis = get_redis()
         try:
-            if await AttendanceRepository.exists_by_event_and_user(
+            existing_attendance = await AttendanceRepository.get_by_event_and_user(
                 event_id,
                 user_id,
                 event_type=event_type,
-            ):
+            )
+            if existing_attendance is not None:
+                duplicate_marker = await redis.get(duplicate_key)
+                if duplicate_marker in (None, f"pending:{message.request_id}"):
+                    await AttendanceWorkerService._publish_checkin_sync(
+                        attendance=existing_attendance,
+                        event_type=event_type,
+                        event_id=event_id,
+                        user_id=user_id,
+                        request_id=message.request_id,
+                    )
                 await AttendanceWorkerService._set_completed_duplicate_marker(
                     duplicate_key=duplicate_key,
                     event_end=None,
@@ -109,7 +148,7 @@ class AttendanceWorkerService:
             if not participant_exists:
                 await redis.delete(duplicate_key)
                 logger.warning(
-                    "[QR-WORKER] Participant missing | event_type=%s | event=%s | user=%s | request_id=%s",
+                    "[qr: Cảnh báo] Không tìm thấy participant, hủy check-in | event_type=%s | event=%s | user=%s | request_id=%s",
                     event_type,
                     event_id,
                     user_id,
@@ -152,13 +191,20 @@ class AttendanceWorkerService:
                     },
                 )
             )
+            await AttendanceWorkerService._publish_checkin_sync(
+                attendance=attendance,
+                event_type=event_type,
+                event_id=event_id,
+                user_id=user_id,
+                request_id=message.request_id,
+            )
             await AttendanceWorkerService._set_completed_duplicate_marker(
                 duplicate_key=duplicate_key,
                 event_end=None,
                 request_id=message.request_id,
             )
             logger.info(
-                "[QR-WORKER] Check-in completed | request_id=%s | event_type=%s | event=%s | user=%s",
+                "[qr: Thành công] Check-in completed | request_id=%s | event_type=%s | event=%s | user=%s",
                 message.request_id,
                 event_type,
                 event_id,
