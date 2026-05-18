@@ -22,7 +22,7 @@ if not any(
 ):
     load_dotenv(APP_DIR / ".env")
 
-API_PREFIX = "/api"
+API_PREFIX = "/qr"
 BACKEND_CONTAINER_PORT = int(os.getenv("BACKEND_CONTAINER_PORT", "8000"))
 DB_NAME = os.getenv("MONGO_DATABASE") or os.getenv("DB_NAME", "qr_attendance_db")
 
@@ -115,6 +115,18 @@ RABBITMQ_REGISTRATION_SYNC_QUEUE = os.getenv(
 RABBITMQ_REGISTRATION_SYNC_ROUTING_KEY = os.getenv(
     "RABBITMQ_REGISTRATION_SYNC_ROUTING_KEY",
     "registration.sync.requested",
+)
+RABBITMQ_CHECKIN_SYNC_EXCHANGE = os.getenv(
+    "RABBITMQ_CHECKIN_SYNC_EXCHANGE",
+    "attendance.sync.events",
+)
+RABBITMQ_CHECKIN_SYNC_QUEUE = os.getenv(
+    "RABBITMQ_CHECKIN_SYNC_QUEUE",
+    "attendance.sync.queue",
+)
+RABBITMQ_CHECKIN_SYNC_ROUTING_KEY = os.getenv(
+    "RABBITMQ_CHECKIN_SYNC_ROUTING_KEY",
+    "attendance.checkin.completed",
 )
 
 RABBITMQ_PREFETCH_COUNT = int(os.getenv("RABBITMQ_PREFETCH_COUNT", "20"))
