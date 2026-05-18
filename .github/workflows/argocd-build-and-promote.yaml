@@ -5,11 +5,11 @@ on:
     branches: ["main"]
 
 env:
-  ACR_NAME: REPLACE_ME_ACR_NAME
-  ACR_LOGIN_SERVER: REPLACE_ME_ACR_LOGIN_SERVER
+  ACR_NAME: ttcsacr20260519
+  ACR_LOGIN_SERVER: ttcsacr20260519.azurecr.io
   IMAGE_REPOSITORY: ttcs/qr-service
   KUSTOMIZE_IMAGE_NAME: qr-service-image
-  DEPLOY_REPO: REPLACE_ME_OWNER/REPLACE_ME_DEPLOY_REPO
+  DEPLOY_REPO: tuanvu118/k8s
   DEPLOY_FILE: overlays/prod/kustomization.yaml
   DOCKER_CONTEXT: .
   DOCKERFILE_PATH: ./Dockerfile
@@ -83,3 +83,5 @@ jobs:
           git add "${DEPLOY_FILE}"
           git commit -m "chore: promote ${IMAGE_REPOSITORY} to ${{ needs.build-and-push.outputs.image_tag }}" || exit 0
           git push
+
+
