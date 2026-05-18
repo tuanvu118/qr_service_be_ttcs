@@ -10,7 +10,11 @@ from utils.rate_limiter import limiter
 from configs.database import init_db
 from configs.rabbitmq import close_rabbitmq
 from configs.redis_config import close_redis
-from configs.settings import API_PREFIX
+from configs.settings import (
+    API_PREFIX,
+    ENABLE_EMBEDDED_ATTENDANCE_WORKER,
+    ENABLE_EMBEDDED_SYNC_WORKER,
+)
 from middleware.cors import register_cors
 from routers.attendance import router as attendance_router
 from worker.attendance_worker import run_worker as run_attendance_worker
@@ -45,8 +49,10 @@ app.include_router(api_router)
 @app.on_event("startup")
 async def on_startup():
     await init_db()
-    asyncio.create_task(run_sync_worker())
-    asyncio.create_task(run_attendance_worker())
+    if ENABLE_EMBEDDED_SYNC_WORKER:
+        asyncio.create_task(run_sync_worker())
+    if ENABLE_EMBEDDED_ATTENDANCE_WORKER:
+        asyncio.create_task(run_attendance_worker())
 
 
 @app.on_event("shutdown")
