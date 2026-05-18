@@ -1,0 +1,85 @@
+name: Build QR Service And Promote Deploy Repo
+
+on:
+  push:
+    branches: ["main"]
+
+env:
+  ACR_NAME: REPLACE_ME_ACR_NAME
+  ACR_LOGIN_SERVER: REPLACE_ME_ACR_LOGIN_SERVER
+  IMAGE_REPOSITORY: ttcs/qr-service
+  KUSTOMIZE_IMAGE_NAME: qr-service-image
+  DEPLOY_REPO: REPLACE_ME_OWNER/REPLACE_ME_DEPLOY_REPO
+  DEPLOY_FILE: overlays/prod/kustomization.yaml
+  DOCKER_CONTEXT: .
+  DOCKERFILE_PATH: ./Dockerfile
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: meta
+        shell: bash
+        run: echo "image_tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: ACR login
+        run: az acr login --name "$ACR_NAME"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.DOCKER_CONTEXT }}
+          file: ${{ env.DOCKERFILE_PATH }}
+          push: true
+          tags: ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:${{ steps.meta.outputs.image_tag }}
+
+  update-deploy-repo:
+    runs-on: ubuntu-24.04
+    needs: build-and-push
+    steps:
+      - name: Checkout deploy repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.DEPLOY_REPO }}
+          token: ${{ secrets.DEPLOY_REPO_PAT }}
+          path: deploy-repo
+
+      - name: Install yq
+        shell: bash
+        run: |
+          sudo curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64 -o /usr/local/bin/yq
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Update kustomization image tag
+        working-directory: deploy-repo
+        shell: bash
+        run: |
+          export IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
+          yq -i '(.images[] | select(.name == strenv(KUSTOMIZE_IMAGE_NAME)) | .newTag) = strenv(IMAGE_TAG)' "${DEPLOY_FILE}"
+
+      - name: Commit and push
+        working-directory: deploy-repo
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "${DEPLOY_FILE}"
+          git commit -m "chore: promote ${IMAGE_REPOSITORY} to ${{ needs.build-and-push.outputs.image_tag }}" || exit 0
+          git push
