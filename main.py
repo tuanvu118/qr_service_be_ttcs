@@ -7,8 +7,6 @@ from utils.rate_limiter import limiter
 from configs.database import init_db
 from configs.rabbitmq import close_rabbitmq
 from configs.redis_config import close_redis
-from worker.sync_worker import run_sync_worker
-import asyncio
 from configs.settings import API_PREFIX
 from middleware.cors import register_cors
 
@@ -36,7 +34,6 @@ app.include_router(api_router)
 @app.on_event("startup")
 async def on_startup():
     await init_db()
-    asyncio.create_task(run_sync_worker())
 
 
 @app.on_event("shutdown")
